@@ -1,4 +1,5 @@
 import numpy as np
+from numpy import sqrt
 import pandas as pd
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -12,6 +13,8 @@ from keras.regularizers import l1, l2
 from keras.layers import TimeDistributed
 import yfinance as yf
 from datetime import datetime
+from datetime import timedelta
+
 
 # Define the ticker symbol
 tickerSymbol = input("Please enter the ticker symbol: ")
@@ -33,13 +36,29 @@ df = scaler.fit_transform(df)
 train_size = int(len(df) * 0.8)
 train, test = df[0:train_size, :], df[train_size:len(df), :]
 
-# Create a data structure with 60 time-steps and 1 output
-X_train = []
-y_train = []
-for i in range(60, len(train)):
-    X_train.append(train[i-60:i, 0])
-    y_train.append(train[i, 0])
-X_train, y_train = np.array(X_train), np.array(y_train)
+# # Create a data structure with 60 time-steps and 1 output
+# X_train = []
+# y_train = []
+# for i in range(60, len(train)):
+#     X_train.append(train[i-60:i, 0])
+#     y_train.append(train[i, 0])
+# X_train, y_train = np.array(X_train), np.array(y_train)
+# X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
+def create_dataset(dataset, look_back=1):
+    X, Y = [], []
+    for i in range(len(dataset)-look_back-1):
+        a = dataset[i:(i+look_back), 0]
+        X.append(a)
+        Y.append(dataset[i + look_back, 0])
+    return np.array(X), np.array(Y)
+
+# Choose the number of time steps
+look_back = 60  # for example
+
+# Create the data sets
+X_train, y_train = create_dataset(train, look_back)
+
+# Reshape input to be [samples, time steps, features]
 X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
 
 # Build the LSTM model
@@ -47,6 +66,7 @@ model = Sequential()
 
 # Add an LSTM layer with L1 regularization and dropout
 model.add(LSTM(units=50, return_sequences=True, input_shape=(X_train.shape[1], 1), kernel_regularizer=l1(0.01)))
+
 model.add(Dropout(0.3))
 
 # Add another LSTM layer with L2 regularization and dropout
@@ -95,8 +115,11 @@ axs[0].set_ylabel('Stock Price (in $)')
 axs[0].legend()
 axs[0].grid(True)
 
+# Shift the predicted prices forward by 5 days
+predicted_dates = predicted_df.index[-5:] + timedelta(days=5)
+
 # Plot the predicted stock price
-axs[1].plot(predicted_df.index[-5:], predicted_df['Predicted Price'][-5:], color='blue', label='Predicted Stock Price')
+axs[1].plot(predicted_dates, predicted_df['Predicted Price'][-5:], color='blue', label='Predicted Stock Price')
 axs[1].set_title('Predicted Stock Price for ' + tickerSymbol)
 axs[1].set_xlabel('Date')
 axs[1].set_ylabel('Stock Price (in $)')
@@ -113,7 +136,6 @@ plt.tight_layout()
 plt.show()
 
 
-
 # Calculate metrics
 actual_values = df_original['Close'][train_size+60:train_size+60+len(predicted_stock_price)]
 predicted_stock_price = predicted_stock_price[:len(actual_values)]
@@ -122,7 +144,6 @@ predicted_stock_price = predicted_stock_price.flatten()
 rmse = np.sqrt(mean_squared_error(actual_values, predicted_stock_price))
 mae = mean_absolute_error(actual_values, predicted_stock_price)
 r2 = r2_score(actual_values, predicted_stock_price)
-
 
 
 
@@ -135,3 +156,8 @@ print("Evaluation metrics for the trained model:")
 print("Root Mean Squared Error (RMSE): {:.2f}".format(rmse))
 print("Mean Absolute Error (MAE): {:.2f}".format(mae))
 print("R-squared (R2 ): {:.2f}".format(r2))
+
+# Print the predicted prices for the next 5 days
+print("\nPredicted stock prices for the next 5 days:")
+for i, price in enumerate(predicted_stock_price[-5:]):
+    print("Day {}: ${:.2f}".format(i+1, price))
