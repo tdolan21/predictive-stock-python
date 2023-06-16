@@ -11,12 +11,12 @@ The project requires the following Python libraries:
 - matplotlib
 - scikit-learn
 - keras
-- yfinance
+  
 
 You can install these dependencies using pip:
 
 bash
-pip install numpy pandas matplotlib scikit-learn keras yfinance
+pip install numpy pandas matplotlib scikit-learn keras
 
 ## Usage
 
