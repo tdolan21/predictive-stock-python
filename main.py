@@ -1,163 +1,161 @@
-import numpy as np
-from numpy import sqrt
 import pandas as pd
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
+from alpha_vantage.timeseries import TimeSeries
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import numpy as np
+from keras.models import Sequential, save_model, load_model
+from keras.layers import LSTM, Dense, Dropout
+from sklearn.metrics import mean_squared_error
+import matplotlib.pyplot as plt
+import joblib
+from plot_and_output import generate_plot, print_metrics
+import tensorflow as tf
+import backtrader as bt
+from backtest import run_backtest
 
 
-from keras.models import Sequential
-from keras.layers import Dense, LSTM, Dropout
-from keras.regularizers import l1, l2
-from keras.layers import TimeDistributed
-import yfinance as yf
-from datetime import datetime
-from datetime import timedelta
+tf.config.run_functions_eagerly(True)
 
 
-# Define the ticker symbol
-tickerSymbol = input("Please enter the ticker symbol: ")
+def collect_data(symbol):
+    # Initialize the TimeSeries class with your Alpha Vantage API key
+    ts = TimeSeries(key='', output_format='pandas')
 
-# Download the historical data
-tickerData = yf.Ticker(tickerSymbol)
-df_original = tickerData.history(period='1d', start='2010-1-1', end=datetime.today().strftime('%Y-%m-%d'))
-df_original.to_csv('stock_data.csv')
+    try:
+        # Get daily adjusted stock data
+        data, meta_data = ts.get_daily(symbol=symbol, outputsize='full')
 
-# Preprocess the data
-df = df_original['Close'].values
-df = df.reshape(-1, 1)
+        # Select the columns we're interested in
+        data = data[['1. open', '2. high', '3. low', '4. close']]
+    except ValueError:
+        print(f"Error: Invalid stock ticker '{symbol}'")
+        return None
 
-# Normalize the data
-scaler = MinMaxScaler(feature_range=(0, 1))
-df = scaler.fit_transform(df)
+    return data
 
-# Split the data into training and testing sets
-train_size = int(len(df) * 0.8)
-train, test = df[0:train_size, :], df[train_size:len(df), :]
+def preprocess_data(data):
+    # Handle missing values
+    data = data.dropna()
 
-# # Create a data structure with 60 time-steps and 1 output
-# X_train = []
-# y_train = []
-# for i in range(60, len(train)):
-#     X_train.append(train[i-60:i, 0])
-#     y_train.append(train[i, 0])
-# X_train, y_train = np.array(X_train), np.array(y_train)
-# X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
+    # Filter out data before 2023
+    data = data[data.index.year >= 2022]
+
+    # Normalize the data to a range of 0-1
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    data = pd.DataFrame(scaler.fit_transform(data), columns=data.columns, index=data.index)
+
+    return data, scaler
+
+
+# Example usage:
+
+# Collect data
+symbol = input("Enter a stock ticker: ")
+data = collect_data(symbol)
+
+if data is not None:
+    # Preprocess data
+    data, scaler = preprocess_data(data)
+
+    # Print the preprocessed data
+    print(data)
+
+
 def create_dataset(dataset, look_back=1):
     X, Y = [], []
     for i in range(len(dataset)-look_back-1):
-        a = dataset[i:(i+look_back), 0]
+        a = dataset[i:(i+look_back), :]
         X.append(a)
-        Y.append(dataset[i + look_back, 0])
+        Y.append(dataset[i + look_back, 3])  # '4. close' is at index 3
     return np.array(X), np.array(Y)
 
-# Choose the number of time steps
-look_back = 60  # for example
+def create_model(look_back, features):
+    model = Sequential()
+    model.add(LSTM(units=100, return_sequences=True, input_shape=(look_back, features)))  # Increase number of LSTM units
+    model.add(Dropout(0.2))
+    model.add(LSTM(units=100, return_sequences=True))  # Add another LSTM layer
+    model.add(Dropout(0.2))
+    model.add(LSTM(units=100, return_sequences=False))  # Increase number of LSTM units
+    model.add(Dropout(0.2))
+    model.add(Dense(units=1))
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    return model
+# Define look_back period
+look_back = 80  # Number of previous time steps to use as input variables to predict the next time period
 
-# Create the data sets
-X_train, y_train = create_dataset(train, look_back)
+# Prepare the dataset
+X, Y = create_dataset(data.values, look_back)
 
-# Reshape input to be [samples, time steps, features]
-X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
+# Split data into training, validation, and test sets (70% training, 15% validation, 15% testing)
+train_size = int(len(X) * 0.7)
+val_size = int(len(X) * 0.15)
+test_size = len(X) - train_size - val_size
 
-# Build the LSTM model
-model = Sequential()
+X_train, X_val, X_test = X[0:train_size], X[train_size:train_size+val_size], X[train_size+val_size:len(X)]
+Y_train, Y_val, Y_test = Y[0:train_size], Y[train_size:train_size+val_size], Y[train_size+val_size:len(Y)]
 
-# Add an LSTM layer with L1 regularization and dropout
-model.add(LSTM(units=50, return_sequences=True, input_shape=(X_train.shape[1], 1), kernel_regularizer=l1(0.01)))
-
-model.add(Dropout(0.3))
-
-# Add another LSTM layer with L2 regularization and dropout
-model.add(LSTM(units=50, return_sequences=True, kernel_regularizer=l2(0.01)))
-model.add(Dropout(0.3))
-
-# Add another LSTM layer with dropout
-model.add(LSTM(units=50))
-model.add(Dropout(0.3))
-
-# Add a Dense layer
-model.add(Dense(units=1))
-
-# Compile and train the model
+# Create and fit the LSTM network
+features = data.shape[1]
+model = create_model(look_back, features)
 model.compile(optimizer='adam', loss='mean_squared_error')
-model.fit(X_train, y_train, epochs=20, batch_size=32)
 
-# Test the model
-inputs = df[train_size - 60:]  # Use data from the end of the training set to the end of the entire dataset
-inputs = inputs.reshape(-1,1)
-inputs = scaler.transform(inputs)
+history = model.fit(X_train, Y_train, epochs=20, batch_size=64, validation_data=(X_val, Y_val))  # Increase batch size
+# After training the model
+model.save('my_model.h5')  # saves the model weights along with the architecture
 
-X_test = []
-for i in range(60, len(inputs)):  # Start from 60 to create sequences of 60 data points
-    X_test.append(inputs[i-60:i, 0])
-X_test = np.array(X_test)
-X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
-
-predicted_stock_price = model.predict(X_test)
-predicted_stock_price = scaler.inverse_transform(predicted_stock_price)
-
-# Create a new dataframe for the predicted values
-predicted_df = pd.DataFrame(predicted_stock_price[-len(test):], index=df_original.index[train_size:], columns=['Predicted Price'])
+# Generate predictions
+train_predict = model.predict(X_train)
+val_predict = model.predict(X_val)
+test_predict = model.predict(X_test)
 
 
+# Calculate root mean squared error
+train_rmse = np.sqrt(mean_squared_error(Y_train, train_predict))
+val_rmse = np.sqrt(mean_squared_error(Y_val, val_predict))
+test_rmse = np.sqrt(mean_squared_error(Y_test, test_predict))
 
 
-# Plot the results
-fig, axs = plt.subplots(2, figsize=(14,10))
+# Save the weights
+print("Saving model weights...")
+model.save_weights('weights.h5')
+print("Done!")
 
-# Plot the real stock price
-axs[0].plot(df_original.index[-5:], df_original['Close'][-5:], color='red', label='Real Stock Price')
-axs[0].set_title('Real Stock Price for ' + tickerSymbol)
-axs[0].set_xlabel('Date')
-axs[0].set_ylabel('Stock Price (in $)')
-axs[0].legend()
-axs[0].grid(True)
+# Save the scaler
+print("Saving scaler...")
+joblib.dump(scaler, 'scaler.pkl')
+print("Done!")
 
-# Shift the predicted prices forward by 5 days
-predicted_dates = predicted_df.index[-5:] + timedelta(days=5)
-
-# Plot the predicted stock price
-axs[1].plot(predicted_dates, predicted_df['Predicted Price'][-5:], color='blue', label='Predicted Stock Price')
-axs[1].set_title('Predicted Stock Price for ' + tickerSymbol)
-axs[1].set_xlabel('Date')
-axs[1].set_ylabel('Stock Price (in $)')
-axs[1].legend()
-axs[1].grid(True)
-
-# Format the x-axis to display the dates more clearly
-for ax in axs:
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-    ax.xaxis.set_major_locator(mdates.DayLocator())
-    fig.autofmt_xdate()
-
-plt.tight_layout()
-plt.show()
-
-
-# Calculate metrics
-actual_values = df_original['Close'][train_size+60:train_size+60+len(predicted_stock_price)]
-predicted_stock_price = predicted_stock_price[:len(actual_values)]
-
-predicted_stock_price = predicted_stock_price.flatten()
-rmse = np.sqrt(mean_squared_error(actual_values, predicted_stock_price))
-mae = mean_absolute_error(actual_values, predicted_stock_price)
-r2 = r2_score(actual_values, predicted_stock_price)
+print_metrics(train_rmse, val_rmse, test_rmse)
 
 
 
-print("Length of actual values: ", len(actual_values))
-print("Length of predicted values: ", len(predicted_stock_price))
 
 
-# Print metrics
-print("Evaluation metrics for the trained model:")
-print("Root Mean Squared Error (RMSE): {:.2f}".format(rmse))
-print("Mean Absolute Error (MAE): {:.2f}".format(mae))
-print("R-squared (R2 ): {:.2f}".format(r2))
+# Create a new scaler for 'close' prices only
+close_scaler = MinMaxScaler(feature_range=(0, 1))
+close_scaler.fit_transform(data[['4. close']])
 
-# Print the predicted prices for the next 5 days
-print("\nPredicted stock prices for the next 5 days:")
-for i, price in enumerate(predicted_stock_price[-5:]):
-    print("Day {}: ${:.2f}".format(i+1, price))
+print("Saving close scaler...")
+joblib.dump(scaler, 'close_scaler.pkl')
+print("Done!")
+
+
+
+# Inverse transform the 'close' prices
+test_predict_actual = close_scaler.inverse_transform(test_predict)
+Y_test_actual = close_scaler.inverse_transform(Y_test.reshape(-1, 1))
+
+# Assuming Y_test_actual is a numpy array
+Y_test_actual = np.squeeze(Y_test_actual)
+
+# Generate date index for predictions
+dates = data.index[train_size+val_size+look_back+1:train_size+val_size+look_back+1+len(Y_test_actual)]
+
+
+generate_plot(dates, Y_test_actual, test_predict_actual, symbol)
+
+results = run_backtest(dates, Y_test_actual, test_predict_actual)
+
+# Print out the trade statistics
+trade_analyzer = results[0].analyzers.tradeanalyzer.get_analysis()
+for k, v in trade_analyzer.items():
+    print(f'{k}: {v}')
